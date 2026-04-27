@@ -27,6 +27,8 @@ app.get('/api/status', (req, res) => {
     totalItems: store.orders.reduce((s, o) => s + o.items.length, 0),
     totalAttendants: Object.keys(store.attendants).length,
     dateRange: dates.length > 0 ? { from: dates[0], to: dates[dates.length - 1] } : null,
+    totalBudgets: store.budgets.length,
+    budgetsLoadedAt: store.budgetsLoadedAt,
   })
 })
 

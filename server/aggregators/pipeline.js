@@ -8,13 +8,32 @@ function filterOrders({ branch, from, to } = {}) {
   return orders
 }
 
+function filterBudgets({ branch, from, to } = {}) {
+  let budgets = getStore().budgets
+  if (branch) budgets = budgets.filter(b => b.branchId === Number(branch))
+  if (from) budgets = budgets.filter(b => b.date && b.date >= from)
+  if (to) budgets = budgets.filter(b => b.date && b.date <= to)
+  return budgets
+}
+
 export function getFunnel(params) {
   const orders = filterOrders(params)
-  // Orçamentos sheet is empty in MVP — return placeholder
+  const budgets = filterBudgets(params)
+
+  if (budgets.length > 0) {
+    const converted = budgets.filter(b => b.converted).length
+    return {
+      budgeted: budgets.length,
+      converted,
+      conversionRate: Math.round((converted / budgets.length) * 100),
+    }
+  }
+
+  // Fallback when ORÇAMENTOS not loaded: use order count only
   return {
-    budgeted: 0,
+    budgeted: orders.length,
     converted: orders.length,
-    conversionRate: 0,
+    conversionRate: 100,
   }
 }
 

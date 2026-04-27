@@ -11,11 +11,15 @@
  * PRREAL (item): can be corrupted as an Excel date serial (number > 40000).
  */
 
-const EXCEL_EPOCH = new Date(1899, 11, 30)
+// Excel epoch with leap-year-bug correction: serial 1 = Jan 1, 1900.
+// Serials > 59 are off-by-one because Excel mistakenly counted Feb 29, 1900.
+const EXCEL_EPOCH = new Date(1899, 11, 31) // Dec 31, 1899
 
 function excelSerialToDate(serial) {
+  let days = Math.floor(serial)
+  if (days > 59) days-- // skip phantom Feb 29, 1900
   const date = new Date(EXCEL_EPOCH)
-  date.setDate(EXCEL_EPOCH.getDate() + serial)
+  date.setDate(EXCEL_EPOCH.getDate() + days)
   return date
 }
 

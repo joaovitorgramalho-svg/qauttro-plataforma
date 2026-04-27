@@ -58,6 +58,14 @@ export const api = {
       return r.json() as Promise<{ success: boolean; totalAttendants: number; sample: string[] }>
     })
   },
+  uploadOrcamentos: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return fetch(`${BASE}/upload/orcamentos`, { method: 'POST', body: form }).then(r => {
+      if (!r.ok) throw new Error(`Upload failed: ${r.status}`)
+      return r.json() as Promise<OrcamentosUploadResult>
+    })
+  },
 }
 
 function toQuery(params?: Record<string, string | undefined>): string {
@@ -79,6 +87,8 @@ export interface DataStatus {
   totalItems: number
   totalAttendants: number
   dateRange: { from: string; to: string } | null
+  totalBudgets: number
+  budgetsLoadedAt: string | null
 }
 
 export interface SalesParams {
@@ -183,4 +193,12 @@ export interface UploadResult {
   totalAttendants: number
   dateRange: { from: string; to: string }
   warnings: string[]
+}
+
+export interface OrcamentosUploadResult {
+  success: boolean
+  totalBudgets: number
+  totalConverted: number
+  dateRange: { from: string; to: string } | null
+  sheetUsed: string
 }

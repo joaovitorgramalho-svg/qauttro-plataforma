@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { api } from '@/lib/api'
 import { BRANCHES } from '@/types'
-import { CheckCircle2, FileSpreadsheet, AlertCircle, Trash2, UserCheck } from 'lucide-react'
+import { CheckCircle2, FileSpreadsheet, AlertCircle, Trash2, UserCheck, ClipboardList } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export default function Configuracoes() {
@@ -20,6 +20,10 @@ export default function Configuracoes() {
   const [draggingFunc, setDraggingFunc] = useState(false)
   const [uploadingFunc, setUploadingFunc] = useState(false)
   const [funcLoaded, setFuncLoaded] = useState<{ total: number; sample: string[] } | null>(null)
+
+  const [draggingOrc, setDraggingOrc] = useState(false)
+  const [uploadingOrc, setUploadingOrc] = useState(false)
+  const [orcLoaded, setOrcLoaded] = useState<{ total: number; converted: number; dateRange: { from: string; to: string } | null } | null>(null)
 
   async function uploadFile(file: File) {
     if (!file.name.match(/\.(xlsx|xls|csv)$/i)) {
@@ -95,6 +99,41 @@ export default function Configuracoes() {
   const handleFileInputFunc = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (file) uploadFuncionarios(file)
+    e.target.value = ''
+  }
+
+  async function uploadOrcamentos(file: File) {
+    if (!file.name.match(/\.(xlsx|xls|csv)$/i)) {
+      toast.error('Arquivo inválido. Envie um arquivo .xlsx, .xls ou .csv.')
+      return
+    }
+    setUploadingOrc(true)
+    try {
+      const result = await api.uploadOrcamentos(file)
+      if (result.success) {
+        setOrcLoaded({ total: result.totalBudgets, converted: result.totalConverted, dateRange: result.dateRange })
+        await refetch()
+        queryClient.invalidateQueries()
+        toast.success(`${result.totalBudgets} orçamentos carregados (${result.totalConverted} convertidos).`)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      toast.error(msg.includes('fetch') || msg.includes('Failed') ? 'Servidor não encontrado.' : msg)
+    } finally {
+      setUploadingOrc(false)
+    }
+  }
+
+  const handleDropOrc = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    setDraggingOrc(false)
+    const file = e.dataTransfer.files[0]
+    if (file) uploadOrcamentos(file)
+  }, [])
+
+  const handleFileInputOrc = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) uploadOrcamentos(file)
     e.target.value = ''
   }
 
@@ -230,6 +269,67 @@ export default function Configuracoes() {
                   {funcLoaded.sample.length > 0 && (
                     <p className="text-green-700 mt-0.5 text-xs">
                       Ex: {funcLoaded.sample.join(', ')}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Upload ORÇAMENTOS */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <ClipboardList className="h-5 w-5" />
+              Upload de Orçamentos
+            </CardTitle>
+            <CardDescription>
+              Exporte a aba <strong>ORÇAMENTOS</strong> do Google Sheets como arquivo .xlsx e faça o upload aqui.
+              Os dados alimentam o funil de conversão no Pipeline.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <label
+              className={cn(
+                'flex flex-col items-center justify-center rounded-lg border-2 border-dashed p-10 cursor-pointer transition-colors',
+                draggingOrc ? 'border-primary bg-primary/5' : 'border-muted-foreground/25 hover:border-primary/50 hover:bg-muted/50'
+              )}
+              onDragOver={e => { e.preventDefault(); setDraggingOrc(true) }}
+              onDragLeave={() => setDraggingOrc(false)}
+              onDrop={handleDropOrc}
+            >
+              <input type="file" className="sr-only" accept=".xlsx,.xls,.csv" onChange={handleFileInputOrc} />
+              {uploadingOrc ? (
+                <>
+                  <div className="h-10 w-10 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+                  <p className="mt-3 text-sm font-medium">Processando orçamentos...</p>
+                </>
+              ) : (
+                <>
+                  <FileSpreadsheet className="h-10 w-10 text-muted-foreground" />
+                  <p className="mt-3 text-sm font-medium">Arraste o arquivo de orçamentos aqui ou clique para selecionar</p>
+                  <p className="mt-1 text-xs text-muted-foreground">.xlsx, .xls ou .csv — aba ORÇAMENTOS</p>
+                </>
+              )}
+            </label>
+
+            {(orcLoaded || (status?.totalBudgets != null && status.totalBudgets > 0)) && (
+              <div className="flex items-start gap-3 rounded-lg bg-green-50 border border-green-200 p-4">
+                <CheckCircle2 className="h-5 w-5 text-green-600 mt-0.5 shrink-0" />
+                <div className="text-sm">
+                  <p className="font-medium text-green-800">
+                    {orcLoaded?.total ?? status?.totalBudgets} orçamentos carregados
+                  </p>
+                  {orcLoaded && (
+                    <p className="text-green-700 mt-0.5 text-xs">
+                      {orcLoaded.converted} convertidos
+                      {orcLoaded.dateRange ? ` · ${orcLoaded.dateRange.from} → ${orcLoaded.dateRange.to}` : ''}
+                    </p>
+                  )}
+                  {status?.budgetsLoadedAt && (
+                    <p className="text-green-500 text-xs mt-0.5">
+                      Carregado em: {new Date(status.budgetsLoadedAt).toLocaleString('pt-BR')}
                     </p>
                   )}
                 </div>

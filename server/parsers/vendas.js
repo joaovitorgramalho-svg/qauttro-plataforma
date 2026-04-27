@@ -1,14 +1,24 @@
 /**
  * Normalizes the VENDAS sheet.
  *
- * The sheet has a flattened structure where each row represents a formula (item)
- * within an order. The first 8 columns belong to the order (pedido), the rest to
- * the item (fórmula). Column names repeat, so xlsx reads them with suffixes (_1, _2…).
+ * The CSV/XLSX has a flattened structure with two possible layouts per row:
  *
- * Returns an array of normalized orders where each order has an `items` array.
+ * Layout A (order block filled):
+ *   Cols 1-8  : CDFIL, NRRQU, SERIER, PRCOBR, VRTXA, PTDSC, VRDSC, PRREAL  (order totals)
+ *   Cols 9-24 : CDFIL_1, NRRQU_1, ... PRREAL_1, PRCUSTO, CDFUNRE, ..., DTENTR (item detail)
  *
- * DTENTR format: "DD.MM.YYYY" — parsed manually.
- * PRREAL (item): can be corrupted as an Excel date serial (number > 40000).
+ * Layout B (order block empty — very common in exports):
+ *   Cols 1-8  : all empty
+ *   Cols 9-24 : same item block as above, with NRRQU_1 = order number, PRREAL_1 = item price
+ *
+ * Layout B rows were previously being completely skipped. This parser handles both.
+ *
+ * Number format: NRRQU values use Brazilian thousands dots ("27.745" = 27745).
+ * We use the raw string as the order key to avoid dot-as-decimal ambiguity.
+ *
+ * PRREAL_1 in Layout A comes as an Excel date string ("16/05/1900") because
+ * small prices (e.g. R$137) match Excel date serials and get auto-formatted.
+ * We detect and convert these back to the original numeric value.
  */
 
 // Excel epoch with leap-year-bug correction: serial 1 = Jan 1, 1900.
@@ -23,38 +33,48 @@ function excelSerialToDate(serial) {
   return date
 }
 
+// Converts an Excel-auto-formatted price string like "16/05/1900" back to its
+// original numeric value (the Excel serial = the actual price in reais).
+function parsePriceFromDateString(str) {
+  // Only match dates in year 1900 (small serial ≤ 366 = small price ≤ R$366)
+  const m = String(str).trim().match(/^(\d{1,2})\/(\d{1,2})\/(1900)$/)
+  if (!m) return null
+  const day = parseInt(m[1], 10)
+  const month = parseInt(m[2], 10)
+  // Compute Excel serial: days from Jan 1, 1900 (serial 1) including phantom Feb 29
+  const d = new Date(1900, month - 1, day)
+  const jan1 = new Date(1900, 0, 1)
+  let serial = Math.round((d - jan1) / 86400000) + 1 // +1 because Jan 1 = serial 1
+  if (d > new Date(1900, 1, 28)) serial++ // phantom Feb 29 shifts all dates after Feb 28
+  return serial > 0 ? serial : null
+}
+
 function parseBrDate(str) {
   if (!str) return null
   const s = String(str).trim()
-  // DD.MM.YYYY
+  // DD.MM.YYYY (standard export format from Google Sheets)
   const m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/)
   if (m) return new Date(parseInt(m[3]), parseInt(m[2]) - 1, parseInt(m[1]))
-  // Try generic
-  const d = new Date(s)
-  return isNaN(d.getTime()) ? null : d
+  // DD/MM/YYYY fallback
+  const m2 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+  if (m2) return new Date(parseInt(m2[3]), parseInt(m2[2]) - 1, parseInt(m2[1]))
+  return null
 }
 
 function fixPrice(val) {
   if (val === null || val === undefined || val === '') return 0
+  if (typeof val === 'string') {
+    // Check if it's an Excel auto-formatted price displayed as a 1900 date
+    const fromDate = parsePriceFromDateString(val)
+    if (fromDate !== null) return fromDate
+  }
   const num = typeof val === 'number' ? val : parseFloat(String(val).replace(',', '.'))
   if (isNaN(num)) return 0
-  // Excel date serials for years 2000-2040 range roughly 36526-73050
-  if (num > 36000 && num < 80000) return 0 // corrupted — return 0 with warning flag
+  // Excel date serials for modern dates (2000-2120) look like large prices — zero them
+  if (num > 36000 && num < 80000) return 0
   return num
 }
 
-function isCurrencyCorrupted(val) {
-  if (val === null || val === undefined || val === '') return false
-  const num = typeof val === 'number' ? val : parseFloat(String(val))
-  return !isNaN(num) && num > 36000 && num < 80000
-}
-
-/**
- * The VENDAS sheet columns (xlsx may read repeated headers with _1 suffix):
- * Order block  : CDFIL, NRRQU, SERIER, PRCOBR, VRTXA, PTDSC, VRDSC, PRREAL
- * Item block   : CDFIL_1, NRRQU_1, SERIER_1, PRCOBR_1, VRTXA_1, PTDSC_1, VRDSC_1, PRREAL_1,
- *                PRCUSTO, CDFUNRE, NRCRM, CDCLI, NOMECLIDAV, OBSPA, TPFORMAFARMA, DTENTR
- */
 export function parseVendas(rows, attendantsMap = {}) {
   const ordersMap = {}
   const warnings = new Set()
@@ -64,54 +84,64 @@ export function parseVendas(rows, attendantsMap = {}) {
     const hasData = Object.values(row).some(v => v !== null && v !== undefined && v !== '')
     if (!hasData) continue
 
-    // Order-level fields
-    const orderBranch = Number(row['CDFIL'] ?? 0)
-    const orderNum = Number(row['NRRQU'] ?? 0)
-    const orderRevenue = fixPrice(row['PRREAL'])
+    // Determine layout: if CDFIL (order block) is empty → Layout B
+    const rawOrderBranch = row['CDFIL']
+    const rawOrderNum = row['NRRQU']
+    const orderBlockFilled = !!(rawOrderBranch && rawOrderBranch !== '' && rawOrderNum && rawOrderNum !== '')
 
-    // Item-level fields (xlsx adds _1 suffix to duplicate column names)
-    const itemBranch = Number(row['CDFIL_1'] ?? row['CDFIL'] ?? 0)
-    const itemNum = Number(row['NRRQU_1'] ?? row['NRRQU'] ?? 0)
-    const itemRevenue = fixPrice(row['PRREAL_1'] ?? row['PRREAL'])
-    const itemCost = fixPrice(row['PRCUSTO'] ?? 0)
+    let orderBranch, orderNumKey, orderRevenue
 
-    if (isCurrencyCorrupted(row['PRREAL_1'])) {
-      warnings.add('Alguns valores de PRREAL (item) estão corrompidos como datas do Excel e foram zerados.')
+    if (orderBlockFilled) {
+      // Layout A: use order block for identity; PRREAL = this item's price
+      orderBranch = Number(rawOrderBranch)
+      orderNumKey = String(rawOrderNum).trim() // keep raw string (PT-BR "34.780")
+      orderRevenue = fixPrice(row['PRREAL'])
+    } else {
+      // Layout B: order block empty — use item block columns instead
+      orderBranch = Number(row['CDFIL_1'] ?? 0)
+      orderNumKey = String(row['NRRQU_1'] ?? '').trim()
+      orderRevenue = fixPrice(row['PRREAL_1'])
     }
 
-    // CDFUNRE can arrive as a number, a numeric string ("27"), empty string, or absent.
-    // Treat anything that doesn't resolve to a positive integer as 0 (unknown attendant).
+    if (!orderBranch || !orderNumKey) continue
+
+    // Item-level fields
+    const itemBranch = Number(row['CDFIL_1'] ?? orderBranch)
+    const itemRevenue = fixPrice(row['PRREAL_1'] ?? 0)
+    const itemCost = fixPrice(row['PRCUSTO'] ?? 0)
+
+    // CDFUNRE can arrive as number, numeric string, empty, or absent
     const rawAttendant = row['CDFUNRE']
     const attendantId =
       rawAttendant !== null && rawAttendant !== undefined && rawAttendant !== ''
         ? Number(rawAttendant)
         : 0
+
     const customerName = String(row['TPFORMAFARMA'] ?? row['NOMECLIDAV'] ?? '').trim()
     const observation = String(row['OBSPA'] ?? '').trim()
 
-    // Date parsing
+    // Date parsing — DTENTR is always in the item block (col 24)
     let date = null
     const rawDate = row['DTENTR']
     if (rawDate) {
-      if (typeof rawDate === 'number') {
-        // Excel stores dates as serial numbers when auto-formatted
-        date = excelSerialToDate(rawDate)
-      } else {
-        date = parseBrDate(rawDate)
-      }
+      date = typeof rawDate === 'number'
+        ? excelSerialToDate(rawDate)
+        : parseBrDate(rawDate)
     }
 
-    if (!orderNum || !orderBranch) continue
-
-    const orderKey = `${orderBranch}-${orderNum}`
+    // Prefix prevents filled rows (F-) from colliding with empty rows (E-).
+    // Filled rows use NRRQU (customer order number); empty rows use NRRQU_1
+    // (which in some exports is the production order number and shares the same
+    // numeric range — merging them would put 2026 revenue under 2025 dates).
+    const orderKey = `${orderBlockFilled ? 'F' : 'E'}-${orderBranch}-${orderNumKey}`
 
     if (!ordersMap[orderKey]) {
       ordersMap[orderKey] = {
-        orderId: orderNum,
+        orderId: parseInt(orderNumKey.replace(/\./g, ''), 10) || 0,
         branchId: orderBranch,
         attendantId,
         attendantName: attendantsMap[attendantId] ?? `Atendente ${attendantId}`,
-        revenue: orderRevenue,
+        revenue: 0,
         cost: 0,
         date: date ? date.toISOString().split('T')[0] : null,
         customerName,
@@ -120,23 +150,35 @@ export function parseVendas(rows, attendantsMap = {}) {
       }
     }
 
+    const order = ordersMap[orderKey]
+
+    // Always accumulate: each row represents one formula/item.
+    // PRREAL (Layout A) and PRREAL_1 (Layout B) are both per-item prices.
+    order.revenue += orderRevenue
+
+    // Patch date if first row had none
+    if (!order.date && date) {
+      order.date = date.toISOString().split('T')[0]
+    }
+
     // Add item
-    ordersMap[orderKey].items.push({
-      itemId: itemNum,
+    order.items.push({
+      itemId: parseInt(String(row['NRRQU_1'] ?? '0').replace(/\./g, ''), 10),
       branchId: itemBranch,
       revenue: itemRevenue,
       cost: itemCost,
     })
-    ordersMap[orderKey].cost += itemCost
+    order.cost += itemCost
+  }
 
-    // Use item revenue if order revenue is 0 (corruption fallback)
-    if (ordersMap[orderKey].revenue === 0 && itemRevenue > 0) {
-      ordersMap[orderKey].revenue = itemRevenue
-    }
+  const orders = Object.values(ordersMap)
+
+  if (warnings.size === 0 && orders.length === 0) {
+    warnings.add('Nenhum pedido foi encontrado. Verifique se o arquivo contém a aba VENDAS.')
   }
 
   return {
-    orders: Object.values(ordersMap),
+    orders,
     warnings: Array.from(warnings),
   }
 }
